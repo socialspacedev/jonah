@@ -23,6 +23,8 @@ Jonah reads that database directly, so you see your library as it was, and you c
 - **Tick what you want.** Use the checkbox, or select rows and press **Space** (or double-click). The **Tick** menu ticks or unticks everything currently shown, so you can search for an artist, then tick all.
 - **Exports neatly.** Songs are copied into `Artist / Album / 03 Title.mp3`. A name that clashes gets ` 2` added, so nothing at the destination is ever overwritten.
 - **Read-only.** Jonah never writes to the iPod.
+- **Keeps the iPod mounted.** Modern macOS has a device-sync agent that ejects old iPods it doesn't support, often seconds after they appear, and the iPod then shows "OK to disconnect" partway through a copy. While Jonah is open, it refuses those ejects. Use Jonah's **Eject** button, or quit Jonah, when you're done.
+- **Reload** (⌘R) reads the iPod again and keeps your ticks.
 - **Copes with a damaged database.** If `iTunesDB` is missing or unreadable, Jonah lists songs from the tags inside the audio files instead.
 
 Greyed-out songs are listed in the database, but Jonah can't find their file on the iPod.

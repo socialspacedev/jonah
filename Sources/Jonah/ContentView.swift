@@ -33,6 +33,10 @@ struct ContentView: View {
         .navigationSubtitle(lib.state == .loaded ? "\(lib.tracks.count) songs" : "")
         .toolbar {
             ToolbarItemGroup {
+                Button("Reload", systemImage: "arrow.clockwise", action: lib.rescan)
+                    .help("Read the iPod again")
+                    .keyboardShortcut("r")
+                    .disabled(lib.state == .loading || lib.exportProgress != nil)
                 Button("Open Folder…", systemImage: "folder", action: chooseFolder)
                     .help("Open an iPod (or a copy of one) from a folder")
                 if lib.root != nil {

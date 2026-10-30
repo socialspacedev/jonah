@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import DiskArbitration
 import Observation
 
 /// Finds a mounted iPod, loads its songs, and copies chosen ones off it.
@@ -22,6 +23,12 @@ final class Library {
     var exportProgress: Double?
     var exportResult: ExportResult?
 
+    /// Keeps macOS's device-sync agent (AMPDeviceDiscoveryAgent) from ejecting the
+    /// iPod moments after it mounts — it doesn't support these old models and lets go
+    /// of them, leaving the iPod showing "OK to disconnect" mid-read.
+    private var diskSession: DASession?
+    private var ejecting = false
+
     var deviceName: String { root?.lastPathComponent ?? "" }
     var checkedTracks: [PodTrack] { tracks.filter { checked.contains($0.id) } }
 
@@ -32,13 +39,46 @@ final class Library {
                 MainActor.assumeIsolated { self?.lookForIPod() }
             }
         }
+        holdIPodsMounted()
         lookForIPod()
+    }
+
+    /// Dissents from any unmount of a volume with an iPod_Control folder while Jonah
+    /// is open, except via our own Eject button. Finder's eject will say Jonah is
+    /// using it, which is true.
+    private func holdIPodsMounted() {
+        guard let session = DASessionCreate(kCFAllocatorDefault) else { return }
+        DASessionSetDispatchQueue(session, .main)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        DARegisterDiskUnmountApprovalCallback(session, nil, { disk, context in
+            guard let context,
+                  let info = DADiskCopyDescription(disk) as? [CFString: Any],
+                  let volume = info[kDADiskDescriptionVolumePathKey] as? URL,
+                  Library.isIPod(volume) else { return nil }
+            let lib = Unmanaged<Library>.fromOpaque(context).takeUnretainedValue()
+            let allow = MainActor.assumeIsolated { lib.ejecting }
+            if allow { return nil }
+            let dissenter = DADissenterCreate(kCFAllocatorDefault, DAReturn(kDAReturnBusy),
+                                              "Jonah is using this iPod. Use Jonah's Eject button, or quit Jonah." as CFString)
+            return Unmanaged.passRetained(dissenter)
+        }, context)
+        diskSession = session
     }
 
     /// Picks the first mounted volume with an iPod_Control folder. Leaves a manually
     /// opened folder alone unless it has gone away.
     func lookForIPod() {
         if let root, FileManager.default.fileExists(atPath: root.path), state != .noDevice { return }
+        rescan()
+    }
+
+    /// Re-reads from scratch — a drive that dropped out mid-read leaves songs wrongly
+    /// marked missing until this runs.
+    func rescan() {
+        if let root, Self.isIPod(root) {
+            open(root, keepTicks: true)
+            return
+        }
         let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? []
         if let pod = volumes.first(where: Self.isIPod) {
             open(pod)
@@ -50,22 +90,23 @@ final class Library {
         }
     }
 
-    static func isIPod(_ url: URL) -> Bool {
+    nonisolated static func isIPod(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.appendingPathComponent("iPod_Control").path)
     }
 
-    func open(_ url: URL) {
+    func open(_ url: URL, keepTicks: Bool = false) {
         guard Self.isIPod(url) else {
             state = .failed(PodError.notAnIPod.localizedDescription)
             return
         }
         root = url
         state = .loading
-        checked = []
+        if !keepTicks { checked = [] }
         exportResult = nil
         Task {
             let (tracks, fallback) = await Self.load(url)
             self.tracks = tracks
+            self.checked.formIntersection(tracks.filter(\.exists).map(\.id))
             self.usedFallback = fallback
             self.state = tracks.isEmpty ? .failed("No songs found on \(url.lastPathComponent).") : .loaded
         }
@@ -180,6 +221,8 @@ final class Library {
 
     func eject() {
         guard let root else { return }
+        ejecting = true
+        defer { ejecting = false }
         try? NSWorkspace.shared.unmountAndEjectDevice(at: root)
     }
 }
