@@ -185,8 +185,18 @@ struct ContentView: View {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Export Here"
-        panel.message = "Songs will be copied into Artist / Album folders"
+        panel.message = "Choose where to copy the ticked songs"
+        let inFolders = NSButton(checkboxWithTitle: "Sort into Artist / Album folders", target: nil, action: nil)
+        inFolders.state = UserDefaults.standard.object(forKey: "exportInFolders") as? Bool == false ? .off : .on
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 36))
+        inFolders.frame.origin = NSPoint(x: 12, y: 9)
+        inFolders.sizeToFit()
+        accessory.addSubview(inFolders)
+        panel.accessoryView = accessory
+        panel.isAccessoryViewDisclosed = true
         panel.directoryURL = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first
-        if panel.runModal() == .OK, let url = panel.url { lib.exportChecked(to: url) }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        UserDefaults.standard.set(inFolders.state == .on, forKey: "exportInFolders")
+        lib.exportChecked(to: url, inFolders: inFolders.state == .on)
     }
 }

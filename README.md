@@ -21,7 +21,7 @@ Jonah reads that database directly, so you see your library as it was, and you c
 - **Finds the iPod by itself.** Any mounted drive with an `iPod_Control` folder is picked up, including when it's plugged in after Jonah is open. **Open Folder…** also works on a copy of an iPod's contents.
 - **Lists your whole library.** Title, artist, album, track number, length and format, sortable by any column and searchable.
 - **Tick what you want.** Use the checkbox, or select rows and press **Space** (or double-click). The **Tick** menu ticks or unticks everything currently shown, so you can search for an artist, then tick all.
-- **Exports neatly.** Songs are copied into `Artist / Album / 03 Title.mp3`. A name that clashes gets ` 2` added, so nothing at the destination is ever overwritten.
+- **Exports neatly.** Songs are copied into `Artist / Album / 03 Title.mp3`. If you untick **Sort into Artist / Album folders** in the Export window, they go straight into the folder you pick as `Artist - Title.mp3`. A name that clashes gets ` 2` added, so nothing at the destination is ever overwritten.
 - **Read-only.** Jonah never writes to the iPod.
 - **Keeps the iPod mounted.** Modern macOS has a device-sync agent that ejects old iPods it doesn't support, often seconds after they appear, and the iPod then shows "OK to disconnect" partway through a copy. While Jonah is open, it refuses those ejects. Use Jonah's **Eject** button, or quit Jonah, when you're done.
 - **Reload** (⌘R) reads the iPod again and keeps your ticks.
@@ -45,7 +45,7 @@ Songs bought from the iTunes Store before 2009 (`.m4p`) copy fine, but they stay
 The app binary also works headless, which is handy for testing or a full backup:
 
     Jonah --list <ipod-root>              # print every song the database knows about
-    Jonah --export <ipod-root> <folder>   # copy every song
+    Jonah --export <ipod-root> <folder>   # copy every song (add --flat for no folders)
     Jonah --diagnose <ipod-root>          # explain why songs show as missing
 
 For example: `.build/release/Jonah --diagnose /Volumes/MYIPOD`.

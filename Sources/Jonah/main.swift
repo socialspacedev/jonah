@@ -11,7 +11,7 @@ struct JonahApp: App {
 
 // Command-line mode, handy for testing without the UI:
 //   Jonah --list <ipod-root>
-//   Jonah --export <ipod-root> <dest-folder>   (copies every song)
+//   Jonah --export <ipod-root> <dest-folder>   (copies every song; add --flat for no folders)
 //   Jonah --diagnose <ipod-root>                 (why songs show as missing)
 let args = CommandLine.arguments
 if args.count >= 3, args[1] == "--diagnose" {
@@ -43,7 +43,7 @@ if args.count >= 3, args[1] == "--list" || args[1] == "--export" {
         print("\(t.exists ? " " : "!") \(t.artist) — \(t.album) — \(t.trackNumber) \(t.title)  [\(Int(t.duration))s, \(t.fileURL.path)]")
     }
     if args[1] == "--export", args.count >= 4 {
-        let result = await Library.export(tracks, to: URL(fileURLWithPath: args[3])) { _ in }
+        let result = await Library.export(tracks, to: URL(fileURLWithPath: args[3]), inFolders: !args.contains("--flat")) { _ in }
         print("copied \(result.copied), failed \(result.failed)")
     }
     exit(0)

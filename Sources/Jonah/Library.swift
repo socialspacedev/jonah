@@ -166,12 +166,12 @@ final class Library {
         var folder: URL
     }
 
-    func exportChecked(to folder: URL) {
+    func exportChecked(to folder: URL, inFolders: Bool = true) {
         let songs = checkedTracks
         exportProgress = 0
         exportResult = nil
         Task {
-            let result = await Self.export(songs, to: folder) { done in
+            let result = await Self.export(songs, to: folder, inFolders: inFolders) { done in
                 Task { @MainActor in self.exportProgress = Double(done) / Double(max(songs.count, 1)) }
             }
             self.exportProgress = nil
@@ -179,20 +179,22 @@ final class Library {
         }
     }
 
-    /// Copies each song to folder/Artist/Album/"NN Title.ext". Never overwrites —
-    /// a clash gets " 2", " 3"… appended.
-    nonisolated static func export(_ songs: [PodTrack], to folder: URL, progress: @escaping @Sendable (Int) -> Void) async -> ExportResult {
+    /// Copies each song to folder/Artist/Album/"NN Title.ext", or with inFolders off,
+    /// straight into folder as "Artist - Title.ext". Never overwrites — a clash gets
+    /// " 2", " 3"… appended.
+    nonisolated static func export(_ songs: [PodTrack], to folder: URL, inFolders: Bool = true, progress: @escaping @Sendable (Int) -> Void) async -> ExportResult {
         await Task.detached {
             let fm = FileManager.default
             var copied = 0
             var failed: [String] = []
             for (i, song) in songs.enumerated() {
-                let dir = folder
+                let dir = inFolders ? folder
                     .appendingPathComponent(safe(song.artist, or: "Unknown Artist"))
-                    .appendingPathComponent(safe(song.album, or: "Unknown Album"))
-                let number = song.trackNumber > 0 ? String(format: "%02d ", song.trackNumber) : ""
+                    .appendingPathComponent(safe(song.album, or: "Unknown Album")) : folder
+                let prefix = !inFolders ? (song.artist.isEmpty ? "" : safe(song.artist, or: "") + " - ")
+                    : song.trackNumber > 0 ? String(format: "%02d ", song.trackNumber) : ""
                 let ext = song.fileURL.pathExtension.lowercased()
-                let base = number + safe(song.title, or: "Untitled")
+                let base = prefix + safe(song.title, or: "Untitled")
                 do {
                     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
                     var dest = dir.appendingPathComponent(base).appendingPathExtension(ext)
