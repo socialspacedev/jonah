@@ -6,6 +6,8 @@
 	<string>Touchwheel</string>
 	<key>CFBundleExecutable</key>
 	<string>Touchwheel</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.andrewlong.touchwheel</string>
 	<key>CFBundleName</key>
