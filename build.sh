@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Build Touchwheel into a double-clickable .app bundle.
+# Build Jonah into a double-clickable .app bundle.
 #
 #   ./build.sh          # fast debug build, then launch
 #   ./build.sh release  # optimized build for everyday use
@@ -11,13 +11,13 @@ cd "$(dirname "$0")"
 
 CONFIG="${1:-debug}"
 LAUNCH="${2:-launch}"
-APP_NAME="Touchwheel"
+APP_NAME="Jonah"
 APP="dist/${APP_NAME}.app"
 
 echo "▶ Building ($CONFIG)…"
 swift build -c "$CONFIG"
 
-BIN=".build/${CONFIG}/Touchwheel"
+BIN=".build/${CONFIG}/Jonah"
 [ -f "$BIN" ] || { echo "✗ Build product not found at $BIN"; exit 1; }
 
 echo "▶ Assembling ${APP}…"

@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Touchwheel",
+    name: "Jonah",
     platforms: [
         .macOS(.v14)
     ],
     targets: [
         .executableTarget(
-            name: "Touchwheel",
-            path: "Sources/Touchwheel",
+            name: "Jonah",
+            path: "Sources/Jonah",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

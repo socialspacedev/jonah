@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct TouchwheelApp: App {
+struct JonahApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -10,9 +10,9 @@ struct TouchwheelApp: App {
 }
 
 // Command-line mode, handy for testing without the UI:
-//   Touchwheel --list <ipod-root>
-//   Touchwheel --export <ipod-root> <dest-folder>   (copies every song)
-//   Touchwheel --diagnose <ipod-root>                 (why songs show as missing)
+//   Jonah --list <ipod-root>
+//   Jonah --export <ipod-root> <dest-folder>   (copies every song)
+//   Jonah --diagnose <ipod-root>                 (why songs show as missing)
 let args = CommandLine.arguments
 if args.count >= 3, args[1] == "--diagnose" {
     let root = URL(fileURLWithPath: args[2])
@@ -49,4 +49,4 @@ if args.count >= 3, args[1] == "--list" || args[1] == "--export" {
     exit(0)
 }
 
-TouchwheelApp.main()
+JonahApp.main()

@@ -29,7 +29,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 440)
-        .navigationTitle(lib.state == .loaded ? lib.deviceName : "Touchwheel")
+        .navigationTitle(lib.state == .loaded ? lib.deviceName : "Jonah")
         .navigationSubtitle(lib.state == .loaded ? "\(lib.tracks.count) songs" : "")
         .toolbar {
             ToolbarItemGroup {
