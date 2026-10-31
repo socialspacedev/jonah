@@ -1,9 +1,14 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var lib = Library()
     @State private var search = ""
     @State private var selection: Set<PodTrack.ID> = []
+    @AppStorage("hideExported") private var hideExported = false
+    @State private var showDuplicates = false
+    @State private var confirmDelete = false
+    @State private var dropTargeted = false
     @State private var sortOrder = [
         KeyPathComparator(\PodTrack.artist),
         KeyPathComparator(\PodTrack.album),
@@ -13,10 +18,18 @@ struct ContentView: View {
 
     private var shown: [PodTrack] {
         let q = search.trimmingCharacters(in: .whitespaces)
-        let hits = q.isEmpty ? lib.tracks : lib.tracks.filter {
-            [$0.title, $0.artist, $0.album, $0.genre].contains { $0.localizedCaseInsensitiveContains(q) }
+        func keep(_ t: PodTrack) -> Bool {
+            if hideExported && lib.exported.contains(t.location) { return false }
+            return q.isEmpty || [t.title, t.artist, t.album, t.genre].contains { $0.localizedCaseInsensitiveContains(q) }
         }
-        return hits.sorted(using: sortOrder)
+        // Duplicates stay together, best copy first, rather than following the column sort.
+        if showDuplicates {
+            return Library.duplicateGroups(lib.tracks)
+                .filter { $0.contains(where: keep) }
+                .sorted { ($0[0].artist, $0[0].title) < ($1[0].artist, $1[0].title) }
+                .flatMap { $0 }
+        }
+        return lib.tracks.filter(keep).sorted(using: sortOrder)
     }
 
     var body: some View {
@@ -36,13 +49,25 @@ struct ContentView: View {
                 Button("Reload", systemImage: "arrow.clockwise", action: lib.rescan)
                     .help("Read the iPod again")
                     .keyboardShortcut("r")
-                    .disabled(lib.state == .loading || lib.exportProgress != nil)
+                    .disabled(lib.state == .loading || lib.progress != nil)
+                Button("Add Songs…", systemImage: "plus", action: chooseSongsToAdd)
+                    .help(lib.canEdit ? "Add songs to the iPod (or drag files onto the list)" : lib.editProblem ?? "")
+                    .disabled(!lib.canEdit || lib.progress != nil)
                 Button("Open Folder…", systemImage: "folder", action: chooseFolder)
                     .help("Open an iPod (or a copy of one) from a folder")
+                Menu("Backups", systemImage: "clock.arrow.circlepath") {
+                    Button("Show Backups in Finder") {
+                        try? FileManager.default.createDirectory(at: Library.backupsFolder, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(Library.backupsFolder)
+                    }
+                    Button("Restore Song List from Backup…", action: chooseBackup)
+                        .disabled(lib.root == nil || lib.usedFallback || lib.progress != nil)
+                }
+                .help("Jonah backs up the iPod's song list before every change")
                 if lib.root != nil {
                     Button("Eject", systemImage: "eject", action: lib.eject)
                         .help("Eject the iPod")
-                        .disabled(lib.exportProgress != nil)
+                        .disabled(lib.progress != nil)
                 }
             }
         }
@@ -57,6 +82,12 @@ struct ContentView: View {
                 Toggle("", isOn: checkBinding(t.id)).labelsHidden().disabled(!t.exists)
             }
             .width(22)
+            TableColumn("") { t in
+                if lib.exported.contains(t.location) {
+                    Image(systemName: "checkmark.circle").foregroundStyle(.secondary).help("Already exported")
+                }
+            }
+            .width(16)
             TableColumn("Title", value: \.title) { t in
                 Text(t.title).foregroundStyle(t.exists ? .primary : .tertiary)
             }
@@ -70,6 +101,10 @@ struct ContentView: View {
                 Text(Duration.seconds(t.duration).formatted(.time(pattern: .minuteSecond))).monospacedDigit()
             }
             .width(52)
+            TableColumn("Bitrate", value: \.bitrate) { t in
+                Text(t.bitrate > 0 ? "\(t.bitrate) kbps" : "").monospacedDigit().foregroundStyle(.secondary)
+            }
+            .width(64)
             TableColumn("Kind", value: \.kind).width(44)
         }
         .searchable(text: $search, prompt: "Title, artist or album")
@@ -83,7 +118,24 @@ struct ContentView: View {
         } primaryAction: { ids in
             toggle(ids)
         }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard lib.canEdit, lib.progress == nil else { return false }
+            lib.add(urls)
+            return true
+        } isTargeted: { dropTargeted = $0 && lib.canEdit }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor, lineWidth: 2).padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) { footer(rows) }
+        .confirmationDialog("Delete \(lib.checked.count) song\(lib.checked.count == 1 ? "" : "s") from the iPod?",
+                            isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive, action: lib.deleteChecked)
+        } message: {
+            Text("Jonah backs up the song list first, but the song files are removed from the iPod for good. Export any you want to keep before deleting.")
+        }
     }
 
     private func footer(_ rows: [PodTrack]) -> some View {
@@ -91,20 +143,34 @@ struct ContentView: View {
         let bytes = picked.reduce(Int64(0)) { $0 + $1.size }
         return VStack(spacing: 0) {
             Divider()
+            HStack(spacing: 14) {
+                Toggle("Hide exported", isOn: $hideExported).toggleStyle(.checkbox)
+                Toggle("Duplicates only", isOn: $showDuplicates).toggleStyle(.checkbox)
+                if showDuplicates {
+                    Button("Tick Lesser Copies", action: lib.tickLesserDuplicates)
+                        .help("Ticks every copy except the highest-bitrate one in each group")
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
             HStack(spacing: 12) {
-                if let progress = lib.exportProgress {
-                    ProgressView(value: progress).frame(width: 180)
-                    Text("Copying…").foregroundStyle(.secondary)
-                } else if let result = lib.exportResult {
-                    Text(summary(result)).foregroundStyle(result.failed.isEmpty ? Color.secondary : Color.orange)
-                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([result.folder]) }
-                        .buttonStyle(.link)
+                if let progress = lib.progress {
+                    ProgressView(value: progress).frame(width: 160)
+                    Text(lib.progressLabel).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                } else if let notice = lib.notice {
+                    Text(notice.text).foregroundStyle(notice.warning ? Color.orange : Color.secondary)
+                        .lineLimit(2).textSelection(.enabled)
+                    if let folder = notice.folder {
+                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
+                            .buttonStyle(.link)
+                    }
                 } else if lib.usedFallback {
                     Text("Database unreadable — songs listed from the files themselves.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(picked.isEmpty ? "Tick songs to export" :
+                Text(picked.isEmpty ? "Tick songs to export or delete" :
                         "\(picked.count) ticked · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -113,22 +179,23 @@ struct ContentView: View {
                     Button("Untick All Shown") { lib.checked.subtract(rows.map(\.id)) }
                     Divider()
                     Button("Untick Everything") { lib.checked.removeAll() }
+                    Divider()
+                    Button("Tick Lesser Duplicate Copies", action: lib.tickLesserDuplicates)
                 }
                 .fixedSize()
+                Button("Delete…", role: .destructive) { confirmDelete = true }
+                    .help(lib.canEdit ? "Delete the ticked songs from the iPod" : lib.editProblem ?? "")
+                    .disabled(picked.isEmpty || !lib.canEdit || lib.progress != nil)
                 Button("Export…", action: chooseDestination)
                     .buttonStyle(.borderedProminent)
-                    .disabled(picked.isEmpty || lib.exportProgress != nil)
+                    .disabled(picked.isEmpty || lib.progress != nil)
                     .keyboardShortcut("e")
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.top, 6)
+            .padding(.bottom, 10)
         }
         .background(.bar)
-    }
-
-    private func summary(_ r: Library.ExportResult) -> String {
-        let copied = "Copied \(r.copied) song\(r.copied == 1 ? "" : "s")."
-        return r.failed.isEmpty ? copied : "\(copied) \(r.failed.count) couldn't be read."
     }
 
     private func checkBinding(_ id: PodTrack.ID) -> Binding<Bool> {
@@ -177,6 +244,27 @@ struct ContentView: View {
         panel.showsHiddenFiles = true
         panel.message = "Choose the iPod (the folder that contains iPod_Control)"
         if panel.runModal() == .OK, let url = panel.url { lib.open(url) }
+    }
+
+    private func chooseSongsToAdd() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.audio, .folder]
+        panel.prompt = "Add to iPod"
+        panel.message = "Choose songs or folders. Formats the iPod can't play are converted to AAC."
+        if panel.runModal() == .OK { lib.add(panel.urls) }
+    }
+
+    private func chooseBackup() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.prompt = "Restore"
+        panel.message = "Choose a backup folder. The iPod's current song list is backed up first."
+        panel.directoryURL = Library.backupsFolder
+        if panel.runModal() == .OK, let url = panel.url { lib.restore(url) }
     }
 
     private func chooseDestination() {

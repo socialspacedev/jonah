@@ -11,7 +11,11 @@ struct PodTrack: Identifiable, Hashable, Sendable {
     var discNumber: Int
     var year: Int
     var duration: TimeInterval
+    var bitrate: Int
     var size: Int64
+    /// Where the file lives, as the database writes it (":iPod_Control:Music:F03:ABCD.mp3").
+    /// Stable for the life of the song, so it's what exports are remembered by.
+    var location: String
     var fileURL: URL
     var exists: Bool
 
@@ -21,11 +25,13 @@ struct PodTrack: Identifiable, Hashable, Sendable {
 enum PodError: LocalizedError {
     case notAnIPod
     case badDatabase
+    case cantEdit(String)
 
     var errorDescription: String? {
         switch self {
         case .notAnIPod: "That folder has no iPod_Control folder in it."
         case .badDatabase: "The iPod's song database couldn't be read."
+        case .cantEdit(let why): why
         }
     }
 }
@@ -89,7 +95,9 @@ enum ITunesDB {
             discNumber: hl > 96 ? (r.u32(p + 92) ?? 0) : 0,
             year: r.u32(p + 52) ?? 0,
             duration: TimeInterval(r.u32(p + 40) ?? 0) / 1000,
+            bitrate: r.u32(p + 56) ?? 0,
             size: Int64(r.u32(p + 36) ?? 0),
+            location: location,
             fileURL: url,
             exists: FileManager.default.fileExists(atPath: url.path)
         )

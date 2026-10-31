@@ -13,7 +13,34 @@ struct JonahApp: App {
 //   Jonah --list <ipod-root>
 //   Jonah --export <ipod-root> <dest-folder>   (copies every song; add --flat for no folders)
 //   Jonah --diagnose <ipod-root>                 (why songs show as missing)
+//   Jonah --check <ipod-root>                    (can Jonah safely change this iPod?)
+//   Jonah --dupes <ipod-root>                    (duplicate groups, best copy first)
+//   Jonah --add <ipod-root> <file-or-folder>…    (add songs to the iPod)
+//   Jonah --delete <ipod-root> <song-id>…        (delete songs; ids from --list)
+//   Jonah --restore <ipod-root> <backup-folder>  (put a backed-up song list back)
 let args = CommandLine.arguments
+if args.count >= 3, ["--check", "--dupes", "--add", "--delete", "--restore"].contains(args[1]) {
+    let root = URL(fileURLWithPath: args[2])
+    switch args[1] {
+    case "--check":
+        print(Library.editProblem(root, fallback: false) ?? "OK: database round-trips byte for byte; editing allowed")
+    case "--restore" where args.count >= 4:
+        try Library.restore(URL(fileURLWithPath: args[3]), to: root)
+        print("restored")
+    case "--dupes":
+        let (tracks, _) = await Library.load(root)
+        for group in Library.duplicateGroups(tracks) {
+            print(group.enumerated().map { i, t in "\(i == 0 ? "keep" : "drop") #\(t.id) \(t.artist) — \(t.title) \(t.bitrate)kbps \(t.kind)" }
+                .joined(separator: "\n") + "\n")
+        }
+    default:
+        let ids = args[1] == "--delete" ? Set(args.dropFirst(3).compactMap { Int($0) }) : []
+        let files = args[1] == "--add" ? Library.audioFiles(in: args.dropFirst(3).map { URL(fileURLWithPath: $0) }) : []
+        let result = try await Library.applyEdits(delete: ids, add: files, to: root) { label, _ in print("  \(label)") }
+        print("added \(result.added), deleted \(result.deleted), skipped \(result.skipped), backup \(result.backup?.path ?? "-")")
+    }
+    exit(0)
+}
 if args.count >= 3, args[1] == "--diagnose" {
     let root = URL(fileURLWithPath: args[2])
     let fm = FileManager.default
@@ -40,7 +67,7 @@ if args.count >= 3, args[1] == "--list" || args[1] == "--export" {
     let (tracks, fallback) = await Library.load(root)
     print("\(tracks.count) songs\(fallback ? " (from file tags)" : "")")
     for t in tracks {
-        print("\(t.exists ? " " : "!") \(t.artist) — \(t.album) — \(t.trackNumber) \(t.title)  [\(Int(t.duration))s, \(t.fileURL.path)]")
+        print("\(t.exists ? " " : "!") #\(t.id) \(t.artist) — \(t.album) — \(t.trackNumber) \(t.title)  [\(Int(t.duration))s, \(t.bitrate)kbps, \(t.fileURL.path.split(separator: "/").suffix(2).joined(separator: "/"))]")
     }
     if args[1] == "--export", args.count >= 4 {
         let result = await Library.export(tracks, to: URL(fileURLWithPath: args[3]), inFolders: !args.contains("--flat")) { _ in }

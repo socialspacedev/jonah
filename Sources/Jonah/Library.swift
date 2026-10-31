@@ -20,8 +20,21 @@ final class Library {
     /// True when the database was unreadable and we fell back to reading tags from the files.
     var usedFallback = false
 
-    var exportProgress: Double?
-    var exportResult: ExportResult?
+    /// Why this iPod can't be changed (nil means adding and deleting are allowed).
+    var editProblem: String? = "Loading…"
+    var canEdit: Bool { editProblem == nil && state == .loaded }
+    /// Locations of songs already exported from this iPod.
+    var exported: Set<String> = []
+
+    var progress: Double?
+    var progressLabel = ""
+    var notice: Notice?
+
+    struct Notice: Equatable {
+        var text: String
+        var warning = false
+        var folder: URL?
+    }
 
     /// Keeps macOS's device-sync agent (AMPDeviceDiscoveryAgent) from ejecting the
     /// iPod moments after it mounts — it doesn't support these old models and lets go
@@ -102,12 +115,15 @@ final class Library {
         root = url
         state = .loading
         if !keepTicks { checked = [] }
-        exportResult = nil
+        editProblem = "Loading…"
+        exported = ExportLog.load(for: url)
         Task {
             let (tracks, fallback) = await Self.load(url)
+            let problem = await Task.detached { Self.editProblem(url, fallback: fallback) }.value
             self.tracks = tracks
             self.checked.formIntersection(tracks.filter(\.exists).map(\.id))
             self.usedFallback = fallback
+            self.editProblem = problem
             self.state = tracks.isEmpty ? .failed("No songs found on \(url.lastPathComponent).") : .loaded
         }
     }
@@ -132,25 +148,21 @@ final class Library {
 
         var tracks: [PodTrack] = []
         for (i, url) in files.enumerated() {
-            let asset = AVURLAsset(url: url)
-            let meta = (try? await asset.load(.commonMetadata)) ?? []
-            func tag(_ id: AVMetadataIdentifier) async -> String {
-                guard let item = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: id).first else { return "" }
-                return (try? await item.load(.stringValue)) ?? ""
-            }
-            let duration = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 0
-            let title = await tag(.commonIdentifierTitle)
+            let tags = await AudioTags.read(url)
+            let rel = url.path.dropFirst(root.path.count).split(separator: "/").joined(separator: ":")
             tracks.append(PodTrack(
                 id: i,
-                title: title.isEmpty ? url.deletingPathExtension().lastPathComponent : title,
-                artist: await tag(.commonIdentifierArtist),
-                album: await tag(.commonIdentifierAlbumName),
-                genre: "",
-                trackNumber: 0,
+                title: tags.title.isEmpty ? url.deletingPathExtension().lastPathComponent : tags.title,
+                artist: tags.artist,
+                album: tags.album,
+                genre: tags.genre,
+                trackNumber: tags.trackNumber,
                 discNumber: 0,
-                year: 0,
-                duration: duration.isFinite ? duration : 0,
+                year: tags.year,
+                duration: tags.duration,
+                bitrate: tags.bitrate,
                 size: Int64((try? url.resourceValues(forKeys: Set(keys)).fileSize) ?? 0),
+                location: ":" + rel,
                 fileURL: url,
                 exists: true
             ))
@@ -163,20 +175,91 @@ final class Library {
     struct ExportResult: Equatable {
         var copied: Int
         var failed: [String]
+        var copiedLocations: [String]
         var folder: URL
     }
 
     func exportChecked(to folder: URL, inFolders: Bool = true) {
+        guard let root else { return }
         let songs = checkedTracks
-        exportProgress = 0
-        exportResult = nil
+        progress = 0
+        progressLabel = "Copying…"
+        notice = nil
         Task {
             let result = await Self.export(songs, to: folder, inFolders: inFolders) { done in
-                Task { @MainActor in self.exportProgress = Double(done) / Double(max(songs.count, 1)) }
+                Task { @MainActor in self.progress = Double(done) / Double(max(songs.count, 1)) }
             }
-            self.exportProgress = nil
-            self.exportResult = result
+            ExportLog.add(result.copiedLocations, for: root)
+            self.exported.formUnion(result.copiedLocations)
+            self.progress = nil
+            let copied = "Copied \(result.copied) song\(result.copied == 1 ? "" : "s")."
+            self.notice = Notice(text: result.failed.isEmpty ? copied : "\(copied) \(result.failed.count) couldn't be read.",
+                                 warning: !result.failed.isEmpty, folder: folder)
         }
+    }
+
+    // MARK: Changing the iPod
+
+    func add(_ urls: [URL]) {
+        let files = Self.audioFiles(in: urls)
+        guard !files.isEmpty else {
+            notice = Notice(text: "No audio files found in what was added.", warning: true)
+            return
+        }
+        edit(delete: [], add: files)
+    }
+
+    func deleteChecked() {
+        edit(delete: checked, add: [])
+    }
+
+    private func edit(delete ids: Set<PodTrack.ID>, add files: [URL]) {
+        guard let root, canEdit, progress == nil else { return }
+        progress = 0
+        progressLabel = ids.isEmpty ? "Adding…" : "Deleting…"
+        notice = nil
+        Task {
+            do {
+                let result = try await Self.applyEdits(delete: ids, add: files, to: root) { label, value in
+                    Task { @MainActor in
+                        self.progressLabel = label
+                        self.progress = value
+                    }
+                }
+                ExportLog.remove(result.removedLocations, for: root)
+                self.exported.subtract(result.removedLocations)
+                self.checked.subtract(ids)
+                self.progress = nil
+                var parts: [String] = []
+                if result.added > 0 { parts.append("Added \(result.added) song\(result.added == 1 ? "" : "s").") }
+                if result.deleted > 0 { parts.append("Deleted \(result.deleted) song\(result.deleted == 1 ? "" : "s").") }
+                if !result.skipped.isEmpty { parts.append("Skipped \(result.skipped.count): \(result.skipped.prefix(3).joined(separator: "; "))") }
+                self.notice = Notice(text: parts.isEmpty ? "Nothing changed." : parts.joined(separator: " "),
+                                     warning: !result.skipped.isEmpty)
+                let note = self.notice
+                self.open(root, keepTicks: true)
+                self.notice = note
+            } catch {
+                self.progress = nil
+                self.notice = Notice(text: error.localizedDescription, warning: true)
+            }
+        }
+    }
+
+    func restore(_ backup: URL) {
+        guard let root, progress == nil else { return }
+        do {
+            try Self.restore(backup, to: root)
+            open(root, keepTicks: true)
+            notice = Notice(text: "Song list restored from \(backup.lastPathComponent).")
+        } catch {
+            notice = Notice(text: "Couldn't restore: \(error.localizedDescription)", warning: true)
+        }
+    }
+
+    /// Ticks every copy except the best one in each duplicate group.
+    func tickLesserDuplicates() {
+        for group in Self.duplicateGroups(tracks) { checked.formUnion(group.dropFirst().map(\.id)) }
     }
 
     /// Copies each song to folder/Artist/Album/"NN Title.ext", or with inFolders off,
@@ -187,6 +270,7 @@ final class Library {
             let fm = FileManager.default
             var copied = 0
             var failed: [String] = []
+            var locations: [String] = []
             for (i, song) in songs.enumerated() {
                 let dir = inFolders ? folder
                     .appendingPathComponent(safe(song.artist, or: "Unknown Artist"))
@@ -205,12 +289,13 @@ final class Library {
                     }
                     try fm.copyItem(at: song.fileURL, to: dest)
                     copied += 1
+                    locations.append(song.location)
                 } catch {
                     failed.append(song.title)
                 }
                 progress(i + 1)
             }
-            return ExportResult(copied: copied, failed: failed, folder: folder)
+            return ExportResult(copied: copied, failed: failed, copiedLocations: locations, folder: folder)
         }.value
     }
 
