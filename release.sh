@@ -29,6 +29,7 @@ cp Info.plist "${APP}/Contents/Info.plist"
 cp AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$APP"
 
-ditto -c -k --keepParent "$APP" "$ZIP"
+# No extended attributes: `unzip` would otherwise leave them as ._ files that break the signature.
+ditto -c -k --norsrc --noextattr --noqtn --keepParent "$APP" "$ZIP"
 lipo -info "${APP}/Contents/MacOS/${APP_NAME}"
 echo "✓ ${ZIP}"
