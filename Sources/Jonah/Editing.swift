@@ -11,6 +11,9 @@ extension Library {
         var deleted = 0
         var skipped: [String] = []
         var removedLocations: [String] = []
+        /// Files that should have gone from the iPod but are still there.
+        var leftOver: [String] = []
+        var playlistsChanged = false
         var backup: URL?
     }
 
@@ -24,7 +27,9 @@ extension Library {
         ITunesDB.resolve(["iPod_Control", "iTunes", "iTunesDB"], under: root)
     }
 
+    /// JONAH_SUPPORT_FOLDER moves it elsewhere (the tests use this).
     nonisolated static var supportFolder: URL {
+        if let path = ProcessInfo.processInfo.environment["JONAH_SUPPORT_FOLDER"] { return URL(fileURLWithPath: path) }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("Jonah")
     }
@@ -35,10 +40,16 @@ extension Library {
     nonisolated static func editProblem(_ root: URL, fallback: Bool) -> String? {
         if fallback { return "The iPod's song database couldn't be read, so Jonah won't change this iPod. Exporting still works." }
         guard let data = try? Data(contentsOf: databaseURL(root)) else { return "The song database couldn't be read." }
+        if FileManager.default.fileExists(atPath: databaseURL(root).deletingLastPathComponent().appendingPathComponent("iTunesSD").path) {
+            return "This looks like an iPod shuffle, which plays from a second song list Jonah doesn't write, so adding and deleting are off. Exporting still works."
+        }
         let bytes = [UInt8](data)
         guard let tree = try? DBTree.parse(bytes), DBTree.serialise(tree) == bytes,
-              DBTree.trackList(tree) != nil, DBTree.masterPlaylist(tree) != nil else {
+              DBTree.trackList(tree) != nil, (DBTree.masterPlaylist(tree)?.header.count ?? 0) >= 48 else {
             return "This iPod's database has a layout Jonah can't rewrite safely, so adding and deleting are off. Exporting still works."
+        }
+        if DBTree.isChecksummed(tree) {
+            return "This iPod checks its song database against a signature only iTunes can make (iPod classic and later), so adding and deleting are off. Exporting still works."
         }
         return nil
     }
@@ -56,20 +67,23 @@ extension Library {
         }
     }
 
-    nonisolated static func applyEdits(delete ids: Set<Int>, add files: [URL], to root: URL,
+    /// Deletes songs, adds files (also to the playlist `into`, if given) and changes
+    /// playlists, as one change to the iPod.
+    nonisolated static func applyEdits(delete ids: Set<Int>, add files: [URL], into playlist: UInt64? = nil,
+                                       playlists edits: [DBTree.PlaylistEdit] = [], to root: URL,
                                        progress: @escaping @Sendable (String, Double) -> Void) async throws -> EditSummary {
         let fm = FileManager.default
         let dbURL = databaseURL(root)
-        let original = [UInt8](try Data(contentsOf: dbURL))
-        let tree = try DBTree.parse(original)
-        guard DBTree.serialise(tree) == original else {
-            throw PodError.cantEdit("This iPod's database has a layout Jonah can't rewrite safely.")
-        }
+        if let problem = editProblem(root, fallback: false) { throw PodError.cantEdit(problem) }
+        let tree = try DBTree.parse([UInt8](try Data(contentsOf: dbURL)))
 
         var summary = EditSummary()
         summary.backup = try backUp(root)
         summary.removedLocations = DBTree.remove(ids, from: tree)
         summary.deleted = summary.removedLocations.count
+        for edit in edits { DBTree.apply(edit, to: tree) }
+        summary.playlistsChanged = !edits.isEmpty
+        var newIDs: [Int] = []
 
         let music = ITunesDB.resolve(["iPod_Control", "Music"], under: root)
         var copied: [URL] = []   // new files on the iPod, taken off again if anything fails
@@ -99,17 +113,22 @@ extension Library {
                 try fm.copyItem(at: source, to: dest)
                 copied.append(dest)
                 let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                DBTree.add(.init(
+                let id = DBTree.add(.init(
                     title: tags.title.isEmpty ? file.deletingPathExtension().lastPathComponent : tags.title,
                     artist: tags.artist, album: tags.album, genre: tags.genre,
                     location: location, ext: ext,
                     trackNumber: tags.trackNumber, year: tags.year, bitrate: tags.bitrate,
                     sampleRate: tags.sampleRate, size: size, durationMs: Int(tags.duration * 1000)
                 ), to: tree)
+                if let id { newIDs.append(id) }
                 summary.added += 1
             }
 
-            guard summary.added > 0 || summary.deleted > 0 else { return summary }
+            if let playlist, !newIDs.isEmpty, let p = DBTree.readPlaylists(tree).first(where: { $0.id == playlist }), !p.smart {
+                DBTree.apply(.setTracks(playlist, p.trackIDs + newIDs), to: tree)
+                summary.playlistsChanged = true
+            }
+            guard summary.added > 0 || summary.deleted > 0 || summary.playlistsChanged else { return summary }
             progress("Updating the iPod's song list", 1)
             try replaceDatabase(at: dbURL, with: DBTree.serialise(tree))
         } catch {
@@ -120,9 +139,11 @@ extension Library {
         if summary.deleted > 0 {
             // Both index into the old track order, which no longer holds. Backed up above.
             let itunes = dbURL.deletingLastPathComponent()
-            for name in ["Play Counts", "OTGPlaylistInfo"] { try? fm.removeItem(at: itunes.appendingPathComponent(name)) }
-            for location in summary.removedLocations {
-                try? fm.removeItem(at: ITunesDB.resolve(location.split(separator: ":").map(String.init), under: root))
+            let stale = ["Play Counts", "OTGPlaylistInfo"].map { itunes.appendingPathComponent($0) }
+            for url in stale + summary.removedLocations.map({ ITunesDB.resolve($0.split(separator: ":").map(String.init), under: root) }) {
+                do { try fm.removeItem(at: url) } catch {
+                    if fm.fileExists(atPath: url.path) { summary.leftOver.append(url.lastPathComponent) }
+                }
             }
         }
         return summary
@@ -147,7 +168,23 @@ extension Library {
             let file = ITunesDB.resolve([name], under: itunes)
             if fm.fileExists(atPath: file.path) { try fm.copyItem(at: file, to: dest.appendingPathComponent(name)) }
         }
+        pruneBackups(of: root)
         return dest
+    }
+
+    /// Keeps the newest `backupsKept` backups of each iPod; playlist tweaks would
+    /// otherwise pile up a backup per change.
+    nonisolated static let backupsKept = 50
+
+    nonisolated static func pruneBackups(of root: URL) {
+        let prefix = root.lastPathComponent + " "
+        let stamp = try! Regex(#"\d{4}-\d{2}-\d{2} \d{6}( \d+)?"#)
+        let mine = ((try? FileManager.default.contentsOfDirectory(atPath: backupsFolder.path)) ?? [])
+            .filter { $0.hasPrefix(prefix) && $0.dropFirst(prefix.count).wholeMatch(of: stamp) != nil }
+            .sorted { $0.localizedStandardCompare($1) == .orderedDescending }
+        for name in mine.dropFirst(backupsKept) {
+            try? FileManager.default.removeItem(at: backupsFolder.appendingPathComponent(name))
+        }
     }
 
     /// Puts a backed-up database back. The current one is backed up first.
@@ -209,7 +246,7 @@ extension Library {
 
     /// Converts to 256 kbps constant-bitrate AAC with macOS's own afconvert, then
     /// writes the original's tags into the new file so it stays labelled off the iPod too.
-    nonisolated private static func convertToAAC(_ url: URL, tags: AudioTags) async -> URL? {
+    nonisolated static func convertToAAC(_ url: URL, tags: AudioTags) async -> URL? {
         let tmp = FileManager.default.temporaryDirectory
         let raw = tmp.appendingPathComponent(UUID().uuidString + ".m4a")
         let out = tmp.appendingPathComponent(UUID().uuidString + ".m4a")
@@ -218,9 +255,15 @@ extension Library {
         let convert = Process()
         convert.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
         convert.arguments = ["-f", "m4af", "-d", "aac", "-b", "256000", "-s", "0", url.path, raw.path]
-        guard (try? convert.run()) != nil else { return nil }
-        convert.waitUntilExit()
-        guard convert.terminationStatus == 0,
+        // Waits for afconvert without holding a thread.
+        let status: Int32? = await withCheckedContinuation { done in
+            convert.terminationHandler = { done.resume(returning: $0.terminationStatus) }
+            do { try convert.run() } catch {
+                convert.terminationHandler = nil
+                done.resume(returning: nil)
+            }
+        }
+        guard status == 0,
               let session = AVAssetExportSession(asset: AVURLAsset(url: raw), presetName: AVAssetExportPresetPassthrough)
         else { return nil }
 
@@ -235,6 +278,7 @@ extension Library {
             item(.iTunesMetadataSongName, tags.title), item(.iTunesMetadataArtist, tags.artist),
             item(.iTunesMetadataAlbum, tags.album), item(.iTunesMetadataUserGenre, tags.genre),
             item(.iTunesMetadataReleaseDate, tags.year > 0 ? "\(tags.year)" : ""),
+            trackNumberItem(tags.trackNumber),
         ].compactMap { $0 }
         session.outputURL = out
         session.outputFileType = .m4a
@@ -242,6 +286,16 @@ extension Library {
             session.exportAsynchronously { done.resume() }
         }
         return session.status == .completed ? out : nil
+    }
+
+    /// iTunes stores the track number as raw bytes: 0, 0, number (big-endian), total, 0, 0.
+    nonisolated private static func trackNumberItem(_ n: Int) -> AVMetadataItem? {
+        guard n > 0 else { return nil }
+        let m = AVMutableMetadataItem()
+        m.identifier = .iTunesMetadataTrackNumber
+        m.dataType = kCMMetadataBaseDataType_RawData as String
+        m.value = Data([0, 0, UInt8(n >> 8 & 0xff), UInt8(n & 0xff), 0, 0, 0, 0]) as NSData
+        return m
     }
 
     // MARK: Duplicates

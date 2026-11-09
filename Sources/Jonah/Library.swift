@@ -16,6 +16,7 @@ final class Library {
     var state: State = .noDevice
     var root: URL?
     var tracks: [PodTrack] = []
+    var playlists: [PodPlaylist] = []
     var checked: Set<PodTrack.ID> = []
     /// True when the database was unreadable and we fell back to reading tags from the files.
     var usedFallback = false
@@ -98,6 +99,7 @@ final class Library {
         } else {
             root = nil
             tracks = []
+            playlists = []
             checked = []
             state = .noDevice
         }
@@ -107,20 +109,23 @@ final class Library {
         FileManager.default.fileExists(atPath: url.appendingPathComponent("iPod_Control").path)
     }
 
-    func open(_ url: URL, keepTicks: Bool = false) {
+    /// `quietly` keeps the current list on screen while re-reading, for after an edit.
+    func open(_ url: URL, keepTicks: Bool = false, quietly: Bool = false) {
         guard Self.isIPod(url) else {
             state = .failed(PodError.notAnIPod.localizedDescription)
             return
         }
         root = url
-        state = .loading
+        if !quietly { state = .loading }
         if !keepTicks { checked = [] }
         editProblem = "Loading…"
         exported = ExportLog.load(for: url)
         Task {
             let (tracks, fallback) = await Self.load(url)
+            let playlists = fallback ? [] : await Task.detached { Self.loadPlaylists(url) }.value
             let problem = await Task.detached { Self.editProblem(url, fallback: fallback) }.value
             self.tracks = tracks
+            self.playlists = playlists
             self.checked.formIntersection(tracks.filter(\.exists).map(\.id))
             self.usedFallback = fallback
             self.editProblem = problem
@@ -136,6 +141,11 @@ final class Library {
             return (tracks, false)
         }
         return (await scanFiles(root), true)
+    }
+
+    nonisolated static func loadPlaylists(_ root: URL) -> [PodPlaylist] {
+        guard let data = try? Data(contentsOf: databaseURL(root)), let tree = try? DBTree.parse([UInt8](data)) else { return [] }
+        return DBTree.readPlaylists(tree)
     }
 
     /// Fallback for a missing or corrupt database: read tags straight from the audio files.
@@ -200,27 +210,41 @@ final class Library {
 
     // MARK: Changing the iPod
 
-    func add(_ urls: [URL]) {
+    /// Adds files to the iPod, and to `playlist` too if given.
+    func add(_ urls: [URL], into playlist: UInt64? = nil) {
         let files = Self.audioFiles(in: urls)
         guard !files.isEmpty else {
             notice = Notice(text: "No audio files found in what was added.", warning: true)
             return
         }
-        edit(delete: [], add: files)
+        edit(delete: [], add: files, into: playlist)
     }
 
     func deleteChecked() {
         edit(delete: checked, add: [])
     }
 
-    private func edit(delete ids: Set<PodTrack.ID>, add files: [URL]) {
+    func editPlaylist(_ change: DBTree.PlaylistEdit) {
+        edit(delete: [], add: [], playlists: [change])
+    }
+
+    /// Adds songs to the end of a playlist, skipping any already in it.
+    func addSongs(_ ids: [PodTrack.ID], to playlist: PodPlaylist) {
+        let new = ids.filter { !playlist.trackIDs.contains($0) }
+        guard !new.isEmpty else { return }
+        editPlaylist(.setTracks(playlist.id, playlist.trackIDs + new))
+    }
+
+    private func edit(delete ids: Set<PodTrack.ID>, add files: [URL], into playlist: UInt64? = nil,
+                      playlists changes: [DBTree.PlaylistEdit] = []) {
         guard let root, canEdit, progress == nil else { return }
         progress = 0
-        progressLabel = ids.isEmpty ? "Adding…" : "Deleting…"
+        progressLabel = !files.isEmpty ? "Adding…" : !ids.isEmpty ? "Deleting…" : "Updating playlists…"
         notice = nil
         Task {
             do {
-                let result = try await Self.applyEdits(delete: ids, add: files, to: root) { label, value in
+                let result = try await Self.applyEdits(delete: ids, add: files, into: playlist, playlists: changes,
+                                                       to: root) { label, value in
                     Task { @MainActor in
                         self.progressLabel = label
                         self.progress = value
@@ -234,10 +258,19 @@ final class Library {
                 if result.added > 0 { parts.append("Added \(result.added) song\(result.added == 1 ? "" : "s").") }
                 if result.deleted > 0 { parts.append("Deleted \(result.deleted) song\(result.deleted == 1 ? "" : "s").") }
                 if !result.skipped.isEmpty { parts.append("Skipped \(result.skipped.count): \(result.skipped.prefix(3).joined(separator: "; "))") }
-                self.notice = Notice(text: parts.isEmpty ? "Nothing changed." : parts.joined(separator: " "),
-                                     warning: !result.skipped.isEmpty)
+                if !result.leftOver.isEmpty {
+                    parts.append("\(result.leftOver.count) file\(result.leftOver.count == 1 ? "" : "s") couldn't be removed from the iPod and still take\(result.leftOver.count == 1 ? "s" : "") up space: \(result.leftOver.prefix(3).joined(separator: ", ")).")
+                }
+                let warn = !result.skipped.isEmpty || !result.leftOver.isEmpty
+                if result.added == 0 && result.deleted == 0 {
+                    // Only playlists changed: no need to re-read every song.
+                    self.playlists = Self.loadPlaylists(root)
+                    self.notice = warn ? Notice(text: parts.joined(separator: " "), warning: true) : nil
+                    return
+                }
+                self.notice = Notice(text: parts.isEmpty ? "Nothing changed." : parts.joined(separator: " "), warning: warn)
                 let note = self.notice
-                self.open(root, keepTicks: true)
+                self.open(root, keepTicks: true, quietly: true)
                 self.notice = note
             } catch {
                 self.progress = nil
@@ -250,7 +283,7 @@ final class Library {
         guard let root, progress == nil else { return }
         do {
             try Self.restore(backup, to: root)
-            open(root, keepTicks: true)
+            open(root, keepTicks: true, quietly: true)
             notice = Notice(text: "Song list restored from \(backup.lastPathComponent).")
         } catch {
             notice = Notice(text: "Couldn't restore: \(error.localizedDescription)", warning: true)

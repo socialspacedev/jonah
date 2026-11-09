@@ -22,6 +22,15 @@ struct PodTrack: Identifiable, Hashable, Sendable {
     var kind: String { fileURL.pathExtension.uppercased() }
 }
 
+/// A playlist as the iPod shows it. Songs are listed by track id, in playlist order.
+struct PodPlaylist: Identifiable, Hashable, Sendable {
+    let id: UInt64
+    var name: String
+    var trackIDs: [Int]
+    /// Smart playlists are filled by rules, so their songs can't be edited by hand.
+    var smart: Bool
+}
+
 enum PodError: LocalizedError {
     case notAnIPod
     case badDatabase

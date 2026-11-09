@@ -13,6 +13,14 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
-        )
+        ),
+        .testTarget(
+            name: "JonahTests",
+            dependencies: ["Jonah"],
+            path: "Tests/JonahTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
     ]
 )

@@ -15,11 +15,12 @@ struct JonahApp: App {
 //   Jonah --diagnose <ipod-root>                 (why songs show as missing)
 //   Jonah --check <ipod-root>                    (can Jonah safely change this iPod?)
 //   Jonah --dupes <ipod-root>                    (duplicate groups, best copy first)
+//   Jonah --playlists <ipod-root>                (each playlist and its songs)
 //   Jonah --add <ipod-root> <file-or-folder>…    (add songs to the iPod)
 //   Jonah --delete <ipod-root> <song-id>…        (delete songs; ids from --list)
 //   Jonah --restore <ipod-root> <backup-folder>  (put a backed-up song list back)
 let args = CommandLine.arguments
-if args.count >= 3, ["--check", "--dupes", "--add", "--delete", "--restore"].contains(args[1]) {
+if args.count >= 3, ["--check", "--dupes", "--playlists", "--add", "--delete", "--restore"].contains(args[1]) {
     let root = URL(fileURLWithPath: args[2])
     switch args[1] {
     case "--check":
@@ -33,11 +34,19 @@ if args.count >= 3, ["--check", "--dupes", "--add", "--delete", "--restore"].con
             print(group.enumerated().map { i, t in "\(i == 0 ? "keep" : "drop") #\(t.id) \(t.artist) — \(t.title) \(t.bitrate)kbps \(t.kind)" }
                 .joined(separator: "\n") + "\n")
         }
+    case "--playlists":
+        let (tracks, _) = await Library.load(root)
+        let byID = Dictionary(tracks.map { ($0.id, $0) }) { a, _ in a }
+        for p in Library.loadPlaylists(root) {
+            print("\(p.name)\(p.smart ? " (smart)" : "") — \(p.trackIDs.count) songs")
+            for id in p.trackIDs { print("    #\(id) \(byID[id].map { "\($0.artist) — \($0.title)" } ?? "(missing)")") }
+        }
     default:
         let ids = args[1] == "--delete" ? Set(args.dropFirst(3).compactMap { Int($0) }) : []
         let files = args[1] == "--add" ? Library.audioFiles(in: args.dropFirst(3).map { URL(fileURLWithPath: $0) }) : []
         let result = try await Library.applyEdits(delete: ids, add: files, to: root) { label, _ in print("  \(label)") }
         print("added \(result.added), deleted \(result.deleted), skipped \(result.skipped), backup \(result.backup?.path ?? "-")")
+        if !result.leftOver.isEmpty { print("couldn't remove: \(result.leftOver.joined(separator: ", "))") }
     }
     exit(0)
 }

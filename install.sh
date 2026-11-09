@@ -66,5 +66,5 @@ fi
 say ""
 say "✓ Jonah is installed. Open it from Applications or Spotlight."
 say "  Plug in your iPod (it should show up in Finder) and Jonah will find it."
-say "  Allow access to removable volumes when macOS asks — Jonah only reads."
+say "  Allow access to removable volumes when macOS asks."
 say ""

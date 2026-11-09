@@ -92,17 +92,31 @@ enum DBTree {
         root.children.first { $0.tag == "mhsd" && $0.u32(12) == 1 }?.children.first
     }
 
+    /// Every playlist in both playlist lists (see `podcastList`).
     static func playlists(_ root: DBNode) -> [DBNode] {
-        root.children
-            .filter { $0.tag == "mhsd" && ($0.u32(12) == 2 || $0.u32(12) == 3) }
-            .flatMap { $0.children.first?.children ?? [] }
-            .filter { $0.tag == "mhyp" }
+        [playlistList(root), podcastList(root)].compactMap { $0 }.flatMap { $0.children }.filter { $0.tag == "mhyp" }
+    }
+
+    /// The playlist list (mhsd type 2) the 3G and earlier read.
+    static func playlistList(_ root: DBNode) -> DBNode? {
+        root.children.first { $0.tag == "mhsd" && $0.u32(12) == 2 }?.children.first
+    }
+
+    /// A second copy of the playlists (mhsd type 3) that later iTunes writes, with
+    /// podcasts grouped by show. Firmware that knows about podcasts reads this one
+    /// instead, so every playlist edit is mirrored into it.
+    static func podcastList(_ root: DBNode) -> DBNode? {
+        root.children.first { $0.tag == "mhsd" && $0.u32(12) == 3 }?.children.first
     }
 
     /// The hidden playlist that lists every song; songs not in it don't appear on the iPod.
     static func masterPlaylist(_ root: DBNode) -> DBNode? {
-        let main = root.children.first { $0.tag == "mhsd" && $0.u32(12) == 2 }?.children.first?.children ?? []
-        return main.first { $0.tag == "mhyp" && $0.header.count > 20 && $0.header[20] == 1 } ?? main.first
+        master(in: playlistList(root))
+    }
+
+    private static func master(in list: DBNode?) -> DBNode? {
+        let all = list?.children.filter { $0.tag == "mhyp" } ?? []
+        return all.first { $0.header.count > 20 && $0.header[20] == 1 } ?? all.first
     }
 
     static func string(_ mhod: DBNode) -> String? {
@@ -111,6 +125,157 @@ enum DBTree {
         let length = u32(h, 28)
         guard 40 + length <= h.count else { return nil }
         return String(bytes: h[40..<40 + length], encoding: u32(h, 24) == 2 ? .utf8 : .utf16LittleEndian)
+    }
+
+    /// iPod classic (2007) and later sign the database: a hashing scheme at +0x30
+    /// of mhbd and a hash at +0x58. Any edit invalidates it and the iPod then shows
+    /// no music, so these are never edited. Earlier iPods leave both zero.
+    static func isChecksummed(_ root: DBNode) -> Bool {
+        let h = root.header
+        let scheme = h.count >= 0x32 ? Int(h[0x30]) | Int(h[0x31]) << 8 : 0
+        let hash = h.count > 0x58 ? h[0x58..<min(0x6c, h.count)] : []
+        return scheme != 0 || hash.contains { $0 != 0 }
+    }
+
+    // MARK: Playlists
+
+    /// mhyp: hidden (master) flag at +20, 64-bit playlist id at +28, podcast flag at +42.
+    static func playlistID(_ p: DBNode) -> UInt64 {
+        p.header.count >= 36 ? (0..<8).reduce(UInt64(0)) { $0 | UInt64(p.header[28 + $1]) << (8 * UInt64($1)) } : 0
+    }
+
+    private static func isPodcast(_ p: DBNode) -> Bool { p.header.count >= 44 && (p.header[42] != 0 || p.header[43] != 0) }
+
+    private static func mhods(_ n: DBNode, type: Int) -> [DBNode] {
+        n.children.filter { $0.tag == "mhod" && $0.u32(12) == type }
+    }
+
+    private static func items(_ p: DBNode) -> [DBNode] { p.children.filter { $0.tag == "mhip" } }
+
+    /// The playlists as the iPod lists them, without the hidden master.
+    static func readPlaylists(_ root: DBNode) -> [PodPlaylist] {
+        let master = masterPlaylist(root)
+        return (playlistList(root)?.children ?? []).filter { $0.tag == "mhyp" && $0 !== master }.map { p in
+            PodPlaylist(id: playlistID(p),
+                        name: mhods(p, type: 1).first.flatMap(string) ?? "Untitled",
+                        trackIDs: items(p).map { $0.u32(24) },
+                        smart: !mhods(p, type: 50).isEmpty)
+        }
+    }
+
+    enum PlaylistEdit: Sendable {
+        case create(id: UInt64, name: String, tracks: [Int])
+        case rename(UInt64, to: String)
+        case delete(UInt64)
+        /// Replaces the playlist's songs with these, in this order.
+        case setTracks(UInt64, [Int])
+    }
+
+    static func apply(_ edit: PlaylistEdit, to root: DBNode) {
+        guard let list = playlistList(root), let master = masterPlaylist(root) else { return }
+        func find(_ id: UInt64) -> DBNode? { list.children.first { $0.tag == "mhyp" && $0 !== master && playlistID($0) == id } }
+        let id: UInt64
+        switch edit {
+        case .create(let newID, let name, let tracks):
+            // Modelled on the master so the firmware sees the header size it already reads.
+            let p = DBNode(header: master.header)
+            p.header[20] = 0
+            put(&p.header, 24, Int(Date().timeIntervalSince1970) + macEpochOffset)
+            withUnsafeBytes(of: newID.littleEndian) { p.header.replaceSubrange(28..<36, with: $0) }
+            if p.header.count >= 48 {
+                p.header[42] = 0; p.header[43] = 0
+                put(&p.header, 44, 1)                     // sort: manual
+            }
+            p.children = [stringMhod(type: 1, name)] + mhods(master, type: 100).map(copy)
+            list.children.append(p)
+            setItems(p, tracks, root: root)
+            id = newID
+        case .rename(let pid, let name):
+            guard let p = find(pid) else { return }
+            if let i = p.children.firstIndex(where: { $0.tag == "mhod" && $0.u32(12) == 1 }) {
+                p.children[i] = stringMhod(type: 1, name)
+            } else {
+                p.children.insert(stringMhod(type: 1, name), at: 0)
+            }
+            id = pid
+        case .delete(let pid):
+            list.children.removeAll { $0.tag == "mhyp" && $0 !== master && playlistID($0) == pid }
+            id = pid
+        case .setTracks(let pid, let tracks):
+            guard let p = find(pid) else { return }
+            setItems(p, tracks, root: root)
+            id = pid
+        }
+        mirror(id, isMaster: false, in: root)
+    }
+
+    /// Keeps existing entries for songs that stay (so their bytes are untouched),
+    /// makes new ones for songs that join, and renumbers positions.
+    private static func setItems(_ p: DBNode, _ tracks: [Int], root: DBNode) {
+        var pool = Dictionary(grouping: items(p)) { $0.u32(24) }
+        var group = nextGroup(root)
+        let entries = tracks.map { track -> DBNode in
+            if let reuse = pool[track]?.first {
+                pool[track]?.removeFirst()
+                return reuse
+            }
+            defer { group += 1 }
+            return playlistItem(track: track, group: group)
+        }
+        p.children = p.children.filter { $0.tag != "mhip" } + entries
+        renumber(p)
+        dropSortIndexes(root)
+    }
+
+    /// mhod 100 inside each mhip holds its position in the playlist.
+    private static func renumber(_ p: DBNode) {
+        for (i, item) in items(p).enumerated() {
+            item.children.first { $0.tag == "mhod" && $0.u32(12) == 100 }?.setU32(24, i)
+        }
+    }
+
+    /// Group ids (+20 in an mhip) are unique across every playlist.
+    private static func nextGroup(_ root: DBNode) -> Int {
+        let used = playlists(root).flatMap(items).map { $0.u32(20) }
+        let tracks = trackList(root)?.children.map { $0.u32(16) } ?? []
+        return max(used.max() ?? 0, tracks.max() ?? 0) + 1
+    }
+
+    private static func playlistItem(track: Int, group: Int) -> DBNode {
+        var ip = [UInt8](repeating: 0, count: 0x4c)
+        ip.replaceSubrange(0..<4, with: Array("mhip".utf8))
+        put(&ip, 4, 0x4c)
+        put(&ip, 20, group)
+        put(&ip, 24, track)
+        put(&ip, 28, Int(Date().timeIntervalSince1970) + macEpochOffset)
+        var pos = [UInt8](repeating: 0, count: 0x2c)      // mhod 100: position, set by renumber
+        pos.replaceSubrange(0..<4, with: Array("mhod".utf8))
+        put(&pos, 4, 0x18)
+        put(&pos, 8, 0x2c)
+        put(&pos, 12, 100)
+        return DBNode(header: ip, children: [DBNode(header: pos)])
+    }
+
+    /// Copies a playlist from the main list into the podcast list (type 3), replacing
+    /// its old copy there, or removes it there if it's gone from the main list.
+    /// The podcast playlist itself is grouped differently in type 3 and never copied.
+    private static func mirror(_ id: UInt64, isMaster: Bool, in root: DBNode) {
+        guard let main = playlistList(root), let other = podcastList(root) else { return }
+        let source = isMaster ? master(in: main)
+            : main.children.first { $0.tag == "mhyp" && !isPodcast($0) && $0 !== master(in: main) && playlistID($0) == id }
+        let otherMaster = master(in: other)
+        let index = isMaster ? otherMaster.flatMap { m in other.children.firstIndex { $0 === m } }
+            : other.children.firstIndex { $0.tag == "mhyp" && !isPodcast($0) && $0 !== otherMaster && playlistID($0) == id }
+        switch (source, index) {
+        case let (source?, index?): other.children[index] = copy(source)
+        case let (source?, nil): other.children.append(copy(source))
+        case let (nil, index?): other.children.remove(at: index)
+        case (nil, nil): break
+        }
+    }
+
+    private static func copy(_ n: DBNode) -> DBNode {
+        DBNode(header: n.header, children: n.children.map(copy))
     }
 
     // MARK: Edits
@@ -127,6 +292,7 @@ enum DBTree {
         }
         for p in playlists(root) {
             p.children.removeAll { $0.tag == "mhip" && ids.contains($0.u32(24)) }
+            renumber(p)
         }
         dropSortIndexes(root)
         return locations
@@ -177,22 +343,10 @@ enum DBTree {
         list.children.append(DBNode(header: h, children: mhods))
 
         if let master = masterPlaylist(root) {
-            let items = master.children.filter { $0.tag == "mhip" }
-            let group = (playlists(root).flatMap { $0.children }.filter { $0.tag == "mhip" }.map { $0.u32(20) }.max() ?? id) + 1
-            var ip = [UInt8](repeating: 0, count: 0x4c)
-            ip.replaceSubrange(0..<4, with: Array("mhip".utf8))
-            put(&ip, 4, 0x4c)
-            put(&ip, 20, group)
-            put(&ip, 24, id)
-            put(&ip, 28, now)
-            var pos = [UInt8](repeating: 0, count: 0x2c)   // mhod 100: position in playlist
-            pos.replaceSubrange(0..<4, with: Array("mhod".utf8))
-            put(&pos, 4, 0x18)
-            put(&pos, 8, 0x2c)
-            put(&pos, 12, 100)
-            put(&pos, 24, items.count)
-            master.children.append(DBNode(header: ip, children: [DBNode(header: pos)]))
+            master.children.append(playlistItem(track: id, group: nextGroup(root)))
+            renumber(master)
             dropSortIndexes(root)
+            mirror(0, isMaster: true, in: root)
         }
         return id
     }
@@ -206,7 +360,7 @@ enum DBTree {
         }
     }
 
-    private static func stringMhod(type: Int, _ s: String) -> DBNode {
+    static func stringMhod(type: Int, _ s: String) -> DBNode {
         let text = Array(s.utf16).flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }
         var h = [UInt8](repeating: 0, count: 40)
         h.replaceSubrange(0..<4, with: Array("mhod".utf8))
