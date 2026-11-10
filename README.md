@@ -8,7 +8,7 @@ Jonah is a small native macOS app for managing the music on a classic iPod (1st 
 
 ## Download
 
-Grab `Jonah-<version>.zip` from the [latest release](https://github.com/socialspacedev/jonah/releases/latest), unzip it, and drag **Jonah** into Applications. It runs on Apple silicon and Intel Macs with macOS 14 (Sonoma) or newer.
+Grab `Jonah-<version>.dmg` from the [latest release](https://github.com/socialspacedev/jonah/releases/latest), open it, and drag **Jonah** into Applications. It runs on Apple silicon and Intel Macs with macOS 14 (Sonoma) or newer.
 
 Jonah isn't notarised by Apple, so the first time you open it macOS says it can't check it for malware. Click **Done**, then open **System Settings ▸ Privacy & Security**, scroll down and click **Open Anyway** next to the message about Jonah. Or, in Terminal:
 
@@ -22,7 +22,7 @@ To skip all that, build it yourself instead (below): an app compiled on your own
     ./build.sh            # debug build + launch
     ./build.sh release    # optimised build → dist/Jonah.app
     ./test.sh             # run the tests
-    ./release.sh          # universal build, zipped for a GitHub release
+    ./release.sh          # universal build, packaged as a DMG for a GitHub release
 
 ## Why
 
