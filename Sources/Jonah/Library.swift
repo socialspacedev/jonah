@@ -383,10 +383,18 @@ final class Library {
         return String(s.prefix(120))
     }
 
+    /// Ejects off the main thread: macOS asks the unmount approval callback above,
+    /// which runs on the main thread, and waiting here would leave it unanswered
+    /// until macOS gave up (about 10 s), sometimes refusing the eject.
     func eject() {
-        guard let root else { return }
+        guard let root, !ejecting else { return }
         ejecting = true
-        defer { ejecting = false }
-        try? NSWorkspace.shared.unmountAndEjectDevice(at: root)
+        Task {
+            let error = await Task.detached { () -> String? in
+                do { try NSWorkspace.shared.unmountAndEjectDevice(at: root); return nil } catch { return error.localizedDescription }
+            }.value
+            ejecting = false
+            if let error { notice = Notice(text: "Couldn't eject: \(error)", warning: true) }
+        }
     }
 }
