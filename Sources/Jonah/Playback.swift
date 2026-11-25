@@ -19,8 +19,9 @@ struct SongMeasurement: Codable, Equatable, Sendable {
 
 enum Playback {
     /// The loudness Sound Check levels songs to. Chosen to match the values iTunes
-    /// wrote for the songs already on the iPod, so new songs sit level with them.
-    static let targetLoudness = -16.0
+    /// wrote for the songs already on the iPod (the median over a sample of 33), so
+    /// new songs sit level with them.
+    static let targetLoudness = -15.5
 
     /// Quieter than this counts as silence.
     static let silence = 0.001                           // -60 dBFS
@@ -49,7 +50,12 @@ enum Playback {
         var peak: Float = 0
 
         while file.framePosition < file.length {
-            do { try file.read(into: buffer) } catch { return nil }
+            do { try file.read(into: buffer) } catch {
+                // MP3 lengths are estimates, often one frame too long, so the last read
+                // can fail. Anywhere earlier, the end is unknown and a trim could cut music.
+                if file.length - file.framePosition < AVAudioFramePosition(rate) { break }
+                return nil
+            }
             let frames = Int(buffer.frameLength)
             guard frames > 0, let data = buffer.floatChannelData else { break }
             for i in 0..<frames {
