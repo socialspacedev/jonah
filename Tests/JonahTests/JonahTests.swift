@@ -49,6 +49,25 @@ private func positions(_ list: DBNode?, _ name: String) -> [Int] {
         .map { $0.children.first { $0.u32(12) == 100 }?.u32(24) ?? -1 }
 }
 
+/// A stereo 1 kHz sine at -20 dBFS between stretches of silence, as a .caf file.
+private func tone(silenceBefore: Double, seconds: Double, silenceAfter: Double, amplitude: Float = 0.1) throws -> URL {
+    let url = try temporaryFolder().appendingPathComponent("tone.caf")
+    let rate = 44100.0
+    let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
+    let total = Int((silenceBefore + seconds + silenceAfter) * rate)
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(total))!
+    buffer.frameLength = AVAudioFrameCount(total)
+    let from = Int(silenceBefore * rate), to = from + Int(seconds * rate)
+    for i in from..<to {
+        let s = amplitude * Float(sin(2 * Double.pi * 1000 * Double(i) / rate))
+        buffer.floatChannelData![0][i] = s
+        buffer.floatChannelData![1][i] = s
+    }
+    let file = try AVAudioFile(forWriting: url, settings: format.settings)
+    try file.write(from: buffer)
+    return url
+}
+
 private func temporaryFolder() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("JonahTests-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -154,6 +173,65 @@ struct DatabaseTests {
     }
 }
 
+struct PlaybackTests {
+    @Test func measuresLoudnessAndSilence() throws {
+        // A -20 dBFS 1 kHz sine in both channels reads -20 LUFS.
+        let steady = try #require(Playback.measure(try tone(silenceBefore: 0, seconds: 5, silenceAfter: 0)))
+        #expect(abs(steady.loudness - -20) < 0.1)
+        #expect(abs(steady.peak - 0.1) < 0.001)
+
+        let m = try #require(Playback.measure(try tone(silenceBefore: 1, seconds: 2, silenceAfter: 1.5)))
+        #expect(abs(m.startMs - 950) <= 10, "starts just before the sound")
+        #expect(abs(m.stopMs - 3100) <= 10, "stops just after it")
+    }
+
+    @Test func leavesShortSilencesAlone() throws {
+        let m = try #require(Playback.measure(try tone(silenceBefore: 0.1, seconds: 2, silenceAfter: 0.2)))
+        #expect(m.startMs == 0 && m.stopMs == 0)
+    }
+
+    @Test func silentFilesAreNotMeasured() throws {
+        #expect(Playback.measure(try tone(silenceBefore: 2, seconds: 0, silenceAfter: 0)) == nil)
+    }
+
+    @Test func soundCheckMatchesITunesScale() {
+        func m(_ loudness: Double, peak: Double = 0.5) -> SongMeasurement {
+            SongMeasurement(loudness: loudness, peak: peak, startMs: 0, stopMs: 0, size: 0)
+        }
+        #expect(Playback.soundCheck(m(Playback.targetLoudness)) == 1000, "1000 means no change")
+        #expect(Playback.soundCheck(m(Playback.targetLoudness + 4)) == 2512, "4 dB too loud, as iTunes writes it")
+        #expect(Playback.soundCheck(m(-30, peak: 0.5)) == 250,
+                "a quiet song is only boosted until its peak reaches full scale (6 dB here, not 14)")
+    }
+
+    @Test func keepsWhatITunesSetAndUndoesOnlyItsOwnTrims() throws {
+        let tree = try makeDB()
+        addSong(tree, "Mine", file: "MINE")
+        addSong(tree, "Theirs", file: "THEIRS")
+        let songs = DBTree.trackList(tree)!.children
+        songs[1].setU32(68, 5000)                         // start time and level set in iTunes
+        songs[1].setU32(76, 1500)
+        let m = SongMeasurement(loudness: -12, peak: 0.9, startMs: 800, stopMs: 190_000, size: 4_000_000)
+        let measured = [":iPod_Control:Music:F00:MINE.mp3": m, ":iPod_Control:Music:F00:THEIRS.mp3": m]
+
+        #expect(DBTree.apply(measured, to: tree) == (levelled: 1, trimmed: 1))
+        #expect(songs[0].u32(68) == 800 && songs[0].u32(72) == 190_000 && songs[0].u32(76) == Playback.soundCheck(m))
+        #expect(songs[1].u32(68) == 5000 && songs[1].u32(72) == 0 && songs[1].u32(76) == 1500)
+        #expect(DBTree.apply(measured, to: tree) == (levelled: 0, trimmed: 0), "running again changes nothing")
+
+        #expect(DBTree.removeTrims(measured, from: tree) == 1)
+        #expect(songs[0].u32(68) == 0 && songs[0].u32(72) == 0)
+        #expect(songs[1].u32(68) == 5000, "iTunes's start time stays")
+    }
+
+    @Test func ignoresMeasurementsOfADifferentFile() throws {
+        let tree = try makeDB()
+        addSong(tree, "Song", file: "SONG")
+        let m = SongMeasurement(loudness: -12, peak: 0.9, startMs: 800, stopMs: 0, size: 123)
+        #expect(DBTree.apply([":iPod_Control:Music:F00:SONG.mp3": m], to: tree) == (levelled: 0, trimmed: 0))
+    }
+}
+
 @Suite(.serialized)
 struct EditingTests {
     init() throws {
@@ -233,6 +311,19 @@ struct EditingTests {
         #expect(left.filter { !$0.contains("MINI") }.count == Library.backupsKept)
         #expect(!left.contains("PRUNEPOD 2026-01-01 000000"), "the oldest go first")
         #expect(left.contains("PRUNEPOD MINI 2020-01-01 000000"), "another iPod's backups are left alone")
+    }
+
+    @Test func addedSongsAreMeasuredAndRemembered() async throws {
+        let (root, _, _) = try makePod()
+        let song = try tone(silenceBefore: 1, seconds: 2, silenceAfter: 1)
+        let result = try await Library.applyEdits(delete: [], add: [song], to: root) { _, _ in }
+        #expect(result.added == 1)
+        let m = try #require(result.measured.values.first)
+        let tree = try DBTree.parse([UInt8](try Data(contentsOf: Library.databaseURL(root))))
+        let t = try #require(DBTree.trackList(tree)?.children.last)
+        #expect(t.u32(68) == m.startMs && m.startMs > 0)
+        #expect(t.u32(72) == m.stopMs && m.stopMs > 0)
+        #expect(t.u32(76) == Playback.soundCheck(m))
     }
 
     @Test func convertedFilesKeepTheirTags() async throws {

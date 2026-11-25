@@ -23,6 +23,7 @@ struct ContentView: View {
     @AppStorage("hideExported") private var hideExported = false
     @State private var showDuplicates = false
     @State private var confirmDelete = false
+    @State private var confirmPlayback = false
     @State private var dropTargeted = false
     @State private var sortOrder = [
         KeyPathComparator(\PodTrack.artist),
@@ -115,6 +116,11 @@ struct ContentView: View {
         } message: { _ in
             Text("Its songs stay on the iPod.")
         }
+        .confirmationDialog("Level and trim songs?", isPresented: $confirmPlayback) {
+            Button("Level & Trim") { lib.improvePlayback() }
+        } message: {
+            Text("Jonah listens to every song it hasn't before, which takes a while the first time, then skips silence at the start and end of each and gives songs without one a Sound Check level. Start and stop times or levels already set in iTunes are kept. Songs added from now on are done as they're added.")
+        }
     }
 
     private var detail: some View {
@@ -140,6 +146,12 @@ struct ContentView: View {
                     .disabled(!lib.canEdit || lib.progress != nil)
                 Button("Open Folder…", systemImage: "folder", action: chooseFolder)
                     .help("Open an iPod (or a copy of one) from a folder")
+                Menu("Playback", systemImage: "waveform") {
+                    Button("Level & Trim Songs…") { confirmPlayback = true }
+                    Button("Remove Jonah's Trims", action: lib.removeTrims)
+                }
+                .help(lib.canEdit ? "Even out volume and skip silence at the start and end of songs" : lib.editProblem ?? "")
+                .disabled(!lib.canEdit || lib.progress != nil)
                 Menu("Backups", systemImage: "clock.arrow.circlepath") {
                     Button("Show Backups in Finder") {
                         try? FileManager.default.createDirectory(at: Library.backupsFolder, withIntermediateDirectories: true)

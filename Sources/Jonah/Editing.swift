@@ -15,6 +15,16 @@ extension Library {
         var leftOver: [String] = []
         var playlistsChanged = false
         var backup: URL?
+        /// What was measured in the added songs, by their new location on the iPod.
+        var measured: [String: SongMeasurement] = [:]
+    }
+
+    struct PlaybackSummary: Sendable {
+        var measured = 0
+        var unreadable = 0
+        var levelled = 0
+        var trimmed = 0
+        var backup: URL?
     }
 
     /// Played as they are by a 3G (Apple Lossless .m4a needs firmware 2.2 or later).
@@ -109,6 +119,8 @@ extension Library {
                 }
                 defer { if let temp { try? fm.removeItem(at: temp) } }
 
+                // Measured on the Mac before copying: much quicker than reading it back off the iPod.
+                let measured = Playback.measure(source)
                 let (dest, location) = try newHome(in: music, root: root, ext: ext)
                 try fm.copyItem(at: source, to: dest)
                 copied.append(dest)
@@ -118,8 +130,11 @@ extension Library {
                     artist: tags.artist, album: tags.album, genre: tags.genre,
                     location: location, ext: ext,
                     trackNumber: tags.trackNumber, year: tags.year, bitrate: tags.bitrate,
-                    sampleRate: tags.sampleRate, size: size, durationMs: Int(tags.duration * 1000)
+                    sampleRate: tags.sampleRate, size: size, durationMs: Int(tags.duration * 1000),
+                    soundCheck: measured.map(Playback.soundCheck) ?? 0,
+                    startMs: measured?.startMs ?? 0, stopMs: measured?.stopMs ?? 0
                 ), to: tree)
+                if let measured { summary.measured[location] = measured }
                 if let id { newIDs.append(id) }
                 summary.added += 1
             }
@@ -147,6 +162,60 @@ extension Library {
             }
         }
         return summary
+    }
+
+    // MARK: Playback
+
+    /// Measures every song not measured before (reading it off the iPod), then gives
+    /// songs without them Sound Check values and start and stop times that skip
+    /// silence. Measurements are saved as they go, so stopping part-way loses little.
+    nonisolated static func improvePlayback(on root: URL,
+                                            progress: @escaping @Sendable (String, Double) -> Void) async throws -> PlaybackSummary {
+        if let problem = editProblem(root, fallback: false) { throw PodError.cantEdit(problem) }
+        let dbURL = databaseURL(root)
+        var summary = PlaybackSummary()
+        let known = MeasureLog.load(for: root)
+        let todo = DBTree.locations(try DBTree.parse([UInt8](try Data(contentsOf: dbURL)))).filter { known[$0] == nil }
+
+        var batch: [String: SongMeasurement] = [:]
+        for (i, location) in todo.enumerated() {
+            let url = ITunesDB.resolve(location.split(separator: ":").map(String.init), under: root)
+            progress("Listening to \(i + 1) of \(todo.count)", Double(i) / Double(max(todo.count, 1)))
+            if let m = Playback.measure(url) {
+                batch[location] = m
+                summary.measured += 1
+            } else {
+                summary.unreadable += 1
+            }
+            if batch.count >= 20 {
+                MeasureLog.add(batch, for: root)
+                batch = [:]
+            }
+        }
+        MeasureLog.add(batch, for: root)
+
+        progress("Updating the iPod's song list", 1)
+        let tree = try DBTree.parse([UInt8](try Data(contentsOf: dbURL)))
+        (summary.levelled, summary.trimmed) = DBTree.apply(MeasureLog.load(for: root), to: tree)
+        if summary.levelled > 0 || summary.trimmed > 0 {
+            summary.backup = try backUp(root)
+            try replaceDatabase(at: dbURL, with: DBTree.serialise(tree))
+        }
+        return summary
+    }
+
+    /// Takes off the start and stop times Jonah set, leaving any set in iTunes.
+    /// Returns how many songs changed.
+    nonisolated static func removeTrims(on root: URL) throws -> Int {
+        if let problem = editProblem(root, fallback: false) { throw PodError.cantEdit(problem) }
+        let dbURL = databaseURL(root)
+        let tree = try DBTree.parse([UInt8](try Data(contentsOf: dbURL)))
+        let removed = DBTree.removeTrims(MeasureLog.load(for: root), from: tree)
+        if removed > 0 {
+            _ = try backUp(root)
+            try replaceDatabase(at: dbURL, with: DBTree.serialise(tree))
+        }
+        return removed
     }
 
     /// Copies the database and the files that index into it to

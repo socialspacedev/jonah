@@ -304,6 +304,7 @@ enum DBTree {
         var ext: String
         var trackNumber, year, bitrate, sampleRate, size: Int
         var durationMs: Int
+        var soundCheck = 0, startMs = 0, stopMs = 0
     }
 
     /// Appends a song to the track list and the master playlist. Returns its id.
@@ -328,6 +329,9 @@ enum DBTree {
         put(&h, 52, t.year)
         put(&h, 56, t.bitrate)
         put(&h, 60, t.sampleRate << 16)
+        put(&h, 68, t.startMs)
+        put(&h, 72, t.stopMs)
+        put(&h, 76, t.soundCheck)
         put(&h, 104, now)                                 // added
         if h.count >= 120 {                               // 64-bit database id
             var dbid = UInt64.random(in: 1...UInt64.max)
@@ -349,6 +353,51 @@ enum DBTree {
             mirror(0, isMaster: true, in: root)
         }
         return id
+    }
+
+    // MARK: Playback
+
+    // mhit: file size at +36, start and stop times (ms) at +68 and +72, Sound Check at +76.
+
+    /// Every song's file location, for picking which ones to measure.
+    static func locations(_ root: DBNode) -> [String] {
+        (trackList(root)?.children ?? []).compactMap { $0.children.first { $0.u32(12) == 2 }.flatMap(string) }
+    }
+
+    /// Fills in Sound Check where the song has none, and start and stop times where
+    /// neither is set, so values set in iTunes are kept. Returns how many songs got each.
+    @discardableResult
+    static func apply(_ measured: [String: SongMeasurement], to root: DBNode) -> (levelled: Int, trimmed: Int) {
+        var levelled = 0, trimmed = 0
+        for t in trackList(root)?.children ?? [] {
+            guard let loc = t.children.first(where: { $0.u32(12) == 2 }).flatMap(string),
+                  let m = measured[loc], m.size == t.u32(36) else { continue }
+            if t.u32(76) == 0 {
+                t.setU32(76, Playback.soundCheck(m))
+                levelled += 1
+            }
+            if t.u32(68) == 0 && t.u32(72) == 0 && (m.startMs > 0 || m.stopMs > 0) {
+                t.setU32(68, m.startMs)
+                t.setU32(72, m.stopMs)
+                trimmed += 1
+            }
+        }
+        return (levelled, trimmed)
+    }
+
+    /// Clears start and stop times that are exactly the ones Jonah set. Returns how many.
+    @discardableResult
+    static func removeTrims(_ measured: [String: SongMeasurement], from root: DBNode) -> Int {
+        var removed = 0
+        for t in trackList(root)?.children ?? [] {
+            guard let loc = t.children.first(where: { $0.u32(12) == 2 }).flatMap(string),
+                  let m = measured[loc], m.startMs > 0 || m.stopMs > 0,
+                  t.u32(68) == m.startMs, t.u32(72) == m.stopMs else { continue }
+            t.setU32(68, 0)
+            t.setU32(72, 0)
+            removed += 1
+        }
+        return removed
     }
 
     /// mhod 52/53 are pre-sorted browse indexes into the track list that later

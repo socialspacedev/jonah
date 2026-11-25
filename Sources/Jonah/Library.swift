@@ -251,6 +251,8 @@ final class Library {
                     }
                 }
                 ExportLog.remove(result.removedLocations, for: root)
+                MeasureLog.remove(result.removedLocations, for: root)
+                MeasureLog.add(result.measured, for: root)
                 self.exported.subtract(result.removedLocations)
                 self.checked.subtract(ids)
                 self.progress = nil
@@ -276,6 +278,48 @@ final class Library {
                 self.progress = nil
                 self.notice = Notice(text: error.localizedDescription, warning: true)
             }
+        }
+    }
+
+    /// Levels and trims every song that needs it; see `improvePlayback(on:progress:)`.
+    func improvePlayback() {
+        guard let root, canEdit, progress == nil else { return }
+        progress = 0
+        progressLabel = "Listening…"
+        notice = nil
+        Task {
+            do {
+                let result = try await Task.detached {
+                    try await Self.improvePlayback(on: root) { label, value in
+                        Task { @MainActor in
+                            self.progressLabel = label
+                            self.progress = value
+                        }
+                    }
+                }.value
+                self.progress = nil
+                var parts = [result.trimmed == 0 && result.levelled == 0 ? "Every song was already done."
+                             : "Trimmed silence from \(result.trimmed) song\(result.trimmed == 1 ? "" : "s"), levelled \(result.levelled)."]
+                if result.levelled > 0 { parts.append("Turn on Sound Check in the iPod's Settings to hear the levelling.") }
+                if result.unreadable > 0 {
+                    parts.append("\(result.unreadable) couldn't be read, perhaps copy-protected.")
+                }
+                self.notice = Notice(text: parts.joined(separator: " "), warning: result.unreadable > 0)
+            } catch {
+                self.progress = nil
+                self.notice = Notice(text: error.localizedDescription, warning: true)
+            }
+        }
+    }
+
+    func removeTrims() {
+        guard let root, canEdit, progress == nil else { return }
+        do {
+            let removed = try Self.removeTrims(on: root)
+            notice = Notice(text: removed == 0 ? "No songs had Jonah's trims." :
+                                "Removed Jonah's trims from \(removed) song\(removed == 1 ? "" : "s"). They play in full again.")
+        } catch {
+            notice = Notice(text: error.localizedDescription, warning: true)
         }
     }
 
