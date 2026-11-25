@@ -4,7 +4,7 @@
 
 Get your songs back out of an old iPod, and put new ones on.
 
-Jonah is a small native macOS app for managing the music on a classic iPod (1st to 5th generation, made with the 3rd-generation touch-wheel model in mind). Plug the iPod in, and Jonah copies chosen songs off it to your Mac with proper names in tidy folders. It can also play songs, add and delete them, clear out duplicates and edit playlists, all without iTunes.
+Jonah is a small native macOS app for managing the music on a classic iPod (1st to 5th generation, made with the 3rd-generation touch-wheel model in mind). Plug the iPod in, and Jonah copies chosen songs off it to your Mac with proper names in tidy folders. It can also play songs, add and delete them, clear out duplicates, edit playlists, and even out volume and skip the silence between songs, all without iTunes.
 
 ## Download
 
@@ -41,6 +41,11 @@ Jonah reads that database directly, so you see your library as it was, and you c
 - **Adds songs.** Click **+** or drag files or folders onto the list. MP3, AAC, WAV, AIFF and Apple Lossless go on as they are. Anything else macOS can read (FLAC, for example) is converted to 256 kbps AAC, keeping its tags. Apple Lossless needs iPod firmware 2.2 or later on a 3G.
 - **Deletes songs.** Tick them, then click **Delete…**. They're removed from the iPod and from every playlist. If a song's file can't be removed (a locked iPod, say), Jonah says which.
 - **Edits playlists.** Playlists are listed down the side. Click **New Playlist** (or right-click songs ▸ **Add to Playlist** ▸ **New Playlist…**), drag songs onto a playlist to add them, and drag them up and down inside it to reorder. **Remove from Playlist** (or the Delete key) takes songs out of the playlist, but leaves them on the iPod. Right-click a playlist to rename or delete it. Dropping files on the list while a playlist is showing adds them to the iPod and to that playlist. Smart playlists (⚙) were filled by iTunes' rules, so their songs can't be changed here. A song listed twice in a playlist shows once, and is kept once after an edit.
+- **Evens out volume and skips silence.** **Playback ▸ Level & Trim Songs…** listens to every song on the iPod once (about a second per song, plus the time to read it off the iPod), then:
+  - gives each song a **Sound Check** level, set to match the levels iTunes gave your existing songs, so they all play at a similar volume. Switch on **Settings ▸ Sound Check** on the iPod to hear it.
+  - sets start and stop times that skip silence of a quarter-second or more at the start and end of a song, so the next song follows sooner. (Old iPods can't play gaplessly, so this is the closest they get.)
+
+  Levels and start/stop times already set in iTunes are kept. Songs added later are levelled and trimmed as they're copied. Measurements are saved as Jonah goes, so if the battery dies part-way, run it again and it picks up where it stopped; nothing is written to the iPod until every song has been heard. **Playback ▸ Remove Jonah's Trims** takes off only the start and stop times Jonah set.
 - **Finds duplicates.** **Duplicates only** shows songs with the same artist and title (ignoring case, accents and punctuation) and lengths within 3 seconds of each other, best copy first. **Tick Lesser Copies** ticks everything except the highest-bitrate copy in each group, ready to delete.
 - **Keeps the iPod mounted.** Modern macOS has a device-sync agent that ejects old iPods it doesn't support, often seconds after they appear, and the iPod then shows "OK to disconnect" partway through a copy. While Jonah is open, it refuses those ejects. Use Jonah's **Eject** button, or quit Jonah, when you're done.
 - **Reload** (⌘R) reads the iPod again and keeps your ticks.
@@ -56,6 +61,7 @@ Adding and deleting means rewriting the iPod's song database (`iTunesDB`). Get t
 - **It backs up before every change.** The database and the files that refer to it go into `~/Library/Application Support/Jonah/Backups/`. Use **Backups ▸ Restore Song List from Backup…** to put one back. The newest 50 backups of each iPod are kept.
 - **It leaves signed databases alone.** iPod classic (2007) and later sign their database, and an iPod shuffle plays from a second list (`iTunesSD`). Jonah can't update either, so on those iPods adding, deleting and playlist editing stay off.
 - **It never half-writes.** The new database is written beside the old one, read back and checked, then swapped in. Deleted song files are only removed after that, so a failure partway through leaves the iPod as it was.
+- **It remembers what it measured.** Loudness and silence measurements are kept in `~/Library/Application Support/Jonah/measured.json`, with each song's file size, so a measurement is never applied to a different song.
 - **Deleting is permanent for the files.** A backup restores the song *list*, but not songs whose files were deleted. Export anything you want to keep first.
 
 Two side effects of a delete: the iPod's recent play counts (not yet sent to iTunes) and its On-The-Go playlist are cleared, because both refer to songs by position. Both are kept in the backup.
@@ -103,7 +109,7 @@ For example: `.build/release/Jonah --diagnose /Volumes/MYIPOD`.
 
 Jonah needs macOS 14 (Sonoma) or newer and the Xcode Command Line Tools (`xcode-select --install`); full Xcode isn't required. It has no third-party dependencies. `install.sh` builds on your Mac, so the app opens without any Gatekeeper warning.
 
-`./test.sh` runs the tests (Swift Testing). They build small iTunesDBs in memory and on disk, and check round-tripping, playlist edits, deleting, backups and conversion. `test.sh` points the compiler at Swift Testing, which the Command Line Tools install but don't put on the search path.
+`./test.sh` runs the tests (Swift Testing). They build small iTunesDBs in memory and on disk, and check round-tripping, playlist edits, deleting, backups, conversion, and loudness and silence measurement against generated test tones. `test.sh` points the compiler at Swift Testing, which the Command Line Tools install but don't put on the search path.
 
 The app icon is generated by `icon/makeicon.swift`.
 
